@@ -1,11 +1,35 @@
-/* TODOS:
--[ ] used relevant CDISC variables in `test` dataset
--[ ] should it be randomization date or other date per SAP for the mentioned windows?
+*---------TASK DESCRIPTION START----------------------------------------------;
+/*
+This task is about creating an analysis flag for visit windows
+per instructions in openly available NAVIGATOR Statistical Analysis Plan, p.33:
+https://classic.clinicaltrials.gov/ProvidedDocs/79/NCT03347279/SAP_003.pdf.
+
+In Section I, we create two datasets:
+a) `visit_windows`, which is a lookup table implementing rules described in SAP,
+b) `test`, which contains unit test cases, together with information about
+the expected result.
+
+In `test` dataset, there are two specific flags:
+1. `true_flag` in ('Y', 'N'): analysis flag for the record that should be chosen
+as the correct analysis observation,
+2. `raw` in ('Y', 'N'): whether a given record is the source data (raw data).
+Note that the rules in SAP require to calculate average of the values in given cases,
+and therefore the correct (i.e., `true_flag` = 'Y') observation may not be raw,
+meaning it is not the collected data, but a function of the collected data.
+
+Section II described the rules from SAP that shall be applied by the user
+in Section III.
+
 */
+*---------TASK DESCRIPTION END------------------------------------------------;
 
-/*https://classic.clinicaltrials.gov/ProvidedDocs/79/NCT03347279/SAP_003.pdf p33*/
 
-/* 01 LOOKUP TABLE */
+*###### SECTION I ############################################################;
+
+
+* set the randomization value;
+%let RANDDT_value = %sysevalf("01JAN2023:10:00:00"dt);
+
 
 data visit_windows;
 retain true_id_window -1;
@@ -27,45 +51,7 @@ Week 20,141,127-154
 ;
 run;
 
-/* 02 DATA SIMULATION TO COVER DIFFERENT SCENARIOS */
 
-/*
-Macro to increase a given datetime by a combination of
-days and/or hours.
-
-@param dt the numeric datetime value
-@param days integer specifying how many days to add
-@param hours integer specifying how many hours to add
-
-@examples
-%let RANDDT_value = %sysevalf("01JAN2023:10:00:00"dt);
-%increase(&RANDDT_value., days=1);
-%increase(&RANDDT_value., hours=5);
-%increase(&RANDDT_value., days=2, hours = 2);
-*/
-%macro increase(dt, days=0, hours=0);
-	%let output = &dt.;
-	%*put [! output = &output.];
-	%if &days. ne 0 %then %do;
-		%let output = %sysfunc(intnx(dtday, &output., &days., same));
-	%end;
-	%if &hours. ne 0 %then %do;
-		%let output = %sysfunc(intnx(dthour, &output., &hours., same));
-	%end;
-	%put &output.;
-	%*put [>> old date: %sysfunc(putn(&dt., datetime.))];
-	%*put [>>   increased by &days. days and &hours. hours];
-	%*put [>> new date: %sysfunc(putn(&output., datetime.))];
-%mend;
-
-/*[COMMENT:] we will not use the macro above after considerations, yet we leave it
-             as a proof of work and for other students to get inspiration*/
-
-* set the randomization value;
-%let RANDDT_value = %sysevalf("01JAN2023:10:00:00"dt);
-
-
-* create test data in two steps ;
 data test_raw;
 infile datalines delimiter="#";
 length true_window $20 true_flag $1 description $200 raw $1;
@@ -135,16 +121,14 @@ data test;
 set test_ test_no_raw;
 run;
 
-proc print data=test; where true_flag = "Y"; run;
-
-* `train` dataset without information about answears ;
 data train;
 set test;
-drop true: description;
+where raw = "Y";
 run;
 
 
-/* 03 THE TASK */
+*###### SECTION II ############################################################;
+
 
 /*
 Derive the final dataset `final`.
@@ -171,17 +155,8 @@ value at that visit in summaries and analysis.
 */
 
 
-/* === 04 THE SOLUTIONS === */
+*###### SECTION III ############################################################;
 
-* Firstly, let's sort the data by the key ;
-
-proc sort data=train;
-by date;
-run;
-
-proc sort data=visit_windows;
-by target_day;
-run;
 
 /* === STEP (A) ===
 join information from window_visits, i.e., an actual window together with its target day.
@@ -206,9 +181,9 @@ quit;
 %put [&starts.];
 
 
-data solution_1(drop=i);
+data solution_1_(drop=i);
 array starts{&sqlobs.} _temporary_ (&starts.);
-set test;
+set train;
 relday = datdif(datepart(&RANDDT_value.), datepart(date), 'ACT/ACT');
 do i=1 to dim(starts);
   if relday >= starts{i} then id_window = i;
@@ -217,10 +192,16 @@ output;
 run;
 
 
-data solution_1a;
+proc sort data=solution_1_;
+by id_window;
+run;
+
+
+data solution_1;
 merge
-  solution_1(in=a)
-  visit_windows(rename=(true_id_window=id_window) keep=time_point true_id_window target_day)
+  solution_1_(in=a)
+  visit_windows(keep=time_point true_id_window target_day
+                rename=(true_id_window=id_window) )
 ;
 by id_window;
 if a;
@@ -238,7 +219,7 @@ requires more computational resources Cartesian joins are included.
 proc sql noprint;
 create table solution_2_ as
 select t1.*, t2.time_point, t2.target_day
-from test as t1
+from train as t1
 left join visit_windows as t2
 /*on t1.reldate between t2.start_window and t2.end_window*/
 on datdif(datepart(&RANDDT_value.), datepart(t1.date), 'ACT/ACT') 
@@ -262,38 +243,60 @@ any changes requiring the windows will require to carefully
 reexamine the analysis program.
 */
 
-/* TBD */
+data solution_3;
+length time_point $ 20;
+set train;
+relday = datdif(datepart(&RANDDT_value.), datepart(date), 'ACT/ACT');
+select;
+when ( 2  <= relday <= 21 ) time_point = "Week 2";
+when ( 22 <= relday <= 42 ) time_point = "Week 4";
+when ( 43 <= relday <= 70 ) time_point = "Week 8";
+when ( 71 <= relday <= 98 ) time_point = "Week 12";
+when ( 99 <= relday <= 126) time_point = "Week 16";
+when ( 127<= relday <= 154) time_point = "Week 20";
+otherwise time_point = "INCORRECT";
+end;
+run;
 
-data b1;
-set solution_1a;
+
+/* === STEP (B) ===
+prepare dataset for implementingt rules,
+we will need proper sorting and access to `first` and `last` variables.
+*/
+
+
+data rules1;
+set solution_1;
 distance = abs(target_day - relday);
 run;
 
 
-proc sort data=b1;
+proc sort data=rules1;
 by id_window distance date;
 run;
 
-proc print data=b1(keep=description date relday distance true_flag avaln);
-run;
-
-proc rank data=b1 out=b2 ties=mean;
-by id_window;
-var distance date;
-ranks rank_dist rank_date;
-run;
-
-proc print data=b2(keep=description time_point date relday distance true_flag avaln rank_dist rank_date);
-run;
-
-* a convience macro to create `first.` and `last.` groups for `groups` variable ;
+/* proc print data=b1(keep=description date relday distance true_flag avaln); */
+/* run; */
+/*  */
+/* proc rank data=b1 out=b2 ties=mean; */
+/* by id_window; */
+/* var distance date; */
+/* ranks rank_dist rank_date; */
+/* run; */
 
 
+/*
+create `first.` and `last.` groups for variables from `groups` 
+macrovariable.
 
+@param din a name of the input dataset
+@param dout a name of the output dataset
+@param groups a list of variable names separated by ' '
+*/
 %macro by_groups(din=, dout=, groups=);
-
 	%let num=1;
 	%let name=%scan(&groups., &num.);
+	
 data &dout.;
 set &din.;
 by &groups.;
@@ -307,68 +310,93 @@ run;
 
 %mend;
 
-%by_groups(din=b2, dout=b3, groups=id_window rank_dist rank_date);
 
-title "Case 1";
-proc print data=b3; 
-where description="Case 1";
-run;
+%*by_groups(din=b2, dout=b3, groups=id_window rank_dist rank_date);
+%by_groups(din=rules1, dout=rules2, groups=id_window distance date);
 
-title "Case 4";
-proc print data=b3; 
-where description="Case 4";
-run;
-title;
 
-* FIRST WAY - DATA STEPS ;
 
-data b4;
+/* === STEP (C) ===
+Derive analysis flag `ANLFL`
+*/
+
+
+/* ----- (I) WAY -----
+Use only data steps
+*/
+
+data final_ds1;
 retain sum no rank_date_number;
-set b3;
+set rules2;
 *where description in ("Case 1", "Case 4");
-by id_window rank_dist rank_date;
-if first.id_window and first.rank_date then do;
+*by id_window rank_dist rank_date;
+by id_window distance date;
+if first.id_window and first.date then do;
   sum = 0;
   no = 0;
-  rank_date_number=0;
+  rank_date_number = 0;
 end;  
 sum + avaln;
 no + 1;
-rank_date_number + last_rank_date;
+rank_date_number + last_date;
 run;
 
-proc print; run;
-
-data b5;
-set b4;
+data final_ds2;
+set final_ds1;
 if rank_date_number = 1 then do;
   avaln = sum / no;
   output;
 end;
 
-proc print; run;
 
 
-* SECOND WAY - PROC MEANS ;
+/* ----- (II) WAY -----
+Use proc means
+*/
 
-data c;
-retain group_id;* group_first_id_window;
-set b3;
-if first_rank_date then do;
+
+data final_proc1;
+retain group_id;
+set rules2;
+if first_date then do;
   group_id + 1;
-  *group_first_id_window = first_id_window;
 end;  
 run;
 
-proc print; run;
 
-
-proc means data=c max mean noprint;
+proc means data=final_proc1
+  max mean noprint;
 by group_id;
-var avaln first_id_window;
-output out=c1(where=(b=1))
- mean(avaln)=a max(first_id_window)=b;* max first_id_window;
+var AVALN FIRST_ID_WINDOW;
+output out=final_proc2(where=(MAX_WINDOW = 1))
+  mean(AVALN)=
+  max(FIRST_ID_WINDOW)=MAX_WINDOW
+;
 run;
 
 
+proc sql noprint;
+create table final_proc3 as
+select t1.group_id, t2.time_point, t1.avaln
+from final_proc2 as t1
+left join (select distinct group_id, time_point
+           from final_proc1) as t2
+on t1.group_id = t2.group_id
+;
+quit;
 
+
+/*---FINAL CHECK---*/
+
+title "Final solution Data Steps";
+proc print data=final_ds2;
+run;
+
+title "Final Solution with Proc Means";
+proc print data=final_proc3;
+run;
+
+title "Test Data for Checking";
+proc print data=test(where=(TRUE_FLAG = "Y"));
+run;
+title;
